@@ -18,7 +18,7 @@ from .. import models
 from ..modules.diffusion_schedule import NoiseSchedule
 from ..metrics import RelativeVolumeMel
 from ..models.builders import get_processor
-from ..utils.samples.manager import SampleManager
+from ..audiocraft_utils.samples.manager import SampleManager
 from ..solvers.compression import CompressionSolver
 
 

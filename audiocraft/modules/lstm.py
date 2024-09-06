@@ -4,10 +4,10 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torch import nn
+from mindspore import nn, ops
 
 
-class StreamableLSTM(nn.Module):
+class StreamableLSTM(nn.Cell):
     """LSTM without worrying about the hidden state, nor the layout of the data.
     Expects input as convolutional layout.
     """
@@ -16,10 +16,11 @@ class StreamableLSTM(nn.Module):
         self.skip = skip
         self.lstm = nn.LSTM(dimension, dimension, num_layers)
 
-    def forward(self, x):
-        x = x.permute(2, 0, 1)
+    def construct(self, x):
+        x = ops.permute(x, (2, 0, 1))
+        print("lstm:", x.shape)
         y, _ = self.lstm(x)
         if self.skip:
             y = y + x
-        y = y.permute(1, 2, 0)
+        y = ops.permute(y, (1, 2, 0))
         return y

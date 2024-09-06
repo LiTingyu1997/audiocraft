@@ -12,7 +12,6 @@ See more info on how to use dora: https://github.com/facebookresearch/dora
 import logging
 import multiprocessing
 import os
-from pathlib import Path
 import sys
 import typing as tp
 
@@ -22,7 +21,7 @@ import hydra
 import omegaconf
 
 from .environment import AudioCraftEnvironment
-from .utils.cluster import get_slurm_parameters
+from .audiocraft_utils.cluster import get_slurm_parameters
 
 logger = logging.getLogger(__name__)
 
@@ -120,11 +119,6 @@ def init_seed_and_system(cfg):
     logger.debug('Setting num threads to %d', cfg.num_threads)
     set_efficient_attention_backend(cfg.efficient_attention_backend)
     logger.debug('Setting efficient attention backend to %s', cfg.efficient_attention_backend)
-    if 'SLURM_JOB_ID' in os.environ:
-        tmpdir = Path('/scratch/slurm_tmpdir/' + os.environ['SLURM_JOB_ID'])
-        if tmpdir.exists():
-            logger.info("Changing tmpdir to %s", tmpdir)
-            os.environ['TMPDIR'] = str(tmpdir)
 
 
 @hydra_main(config_path='../config', config_name='config', version_base='1.1')

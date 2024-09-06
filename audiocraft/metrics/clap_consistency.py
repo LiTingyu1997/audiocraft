@@ -13,7 +13,7 @@ from transformers import RobertaTokenizer  # type: ignore
 
 from ..data.audio_utils import convert_audio
 from ..environment import AudioCraftEnvironment
-from ..utils.utils import load_clap_state_dict
+from ..audiocraft_utils.utils import load_clap_state_dict
 
 try:
     import laion_clap  # type: ignore

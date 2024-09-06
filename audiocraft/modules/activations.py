@@ -4,13 +4,15 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
-import torch
-import torch.nn as nn
-from torch import Tensor
+# import torch
+# import torch.nn as nn
+# from torch import Tensor
+import mindspore
+from mindspore import Tensor, nn, ops
 from typing import Union, Callable
 
 
-class CustomGLU(nn.Module):
+class CustomGLU(nn.Cell):
     """Custom Gated Linear Unit activation.
     Applies a modified gated linear unit :math:`a * f(b)` where :math:`a` is the first half
     of the input matrices, :math:`b` is the second half, and :math:`f` is a provided activation
@@ -30,14 +32,14 @@ class CustomGLU(nn.Module):
         >>> input = torch.randn(4, 2)
         >>> output = m(input)
     """
-    def __init__(self, activation: nn.Module, dim: int = -1):
+    def __init__(self, activation: nn.Cell, dim: int = -1):
         super(CustomGLU, self).__init__()
         self.dim = dim
         self.activation = activation
 
     def forward(self, x: Tensor):
         assert x.shape[self.dim] % 2 == 0  # M = N / 2
-        a, b = torch.chunk(x, 2, dim=self.dim)
+        a, b = ops.chunk(x, 2, dim=self.dim)
         return a * self.activation(b)
 
 

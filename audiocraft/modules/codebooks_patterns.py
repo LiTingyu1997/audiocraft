@@ -11,7 +11,9 @@ import logging
 import typing as tp
 
 from abc import ABC, abstractmethod
-import torch
+# import torch
+import mindspore
+from mindspore import Tensor, ops, nn
 
 LayoutCoord = namedtuple('LayoutCoord', ['t', 'q'])  # (timestep, codebook index)
 PatternLayout = tp.List[tp.List[LayoutCoord]]  # Sequence of coordinates
@@ -116,16 +118,16 @@ class Pattern:
         return steps_with_timesteps[0] if len(steps_with_timesteps) > 0 else None
 
     def _build_pattern_sequence_scatter_indexes(self, timesteps: int, n_q: int, keep_only_valid_steps: bool,
-                                                device: tp.Union[torch.device, str] = 'cpu'):
+                                                device: tp.Union[str] = 'cpu'):
         """Build scatter indexes corresponding to the pattern, up to the provided sequence_steps.
 
         Args:
             timesteps (int): Maximum number of timesteps steps to consider.
             keep_only_valid_steps (bool): Restrict the pattern layout to match only valid steps.
-            device (torch.device or str): Device for created tensors.
+            device (str): Device for created tensors.
         Returns:
-            indexes (torch.Tensor): Indexes corresponding to the sequence, of shape [K, S].
-            mask (torch.Tensor): Mask corresponding to indexes that matches valid indexes, of shape [K, S].
+            indexes (mindspore.Tensor): Indexes corresponding to the sequence, of shape [K, S].
+            mask (mindspore.Tensor): Mask corresponding to indexes that matches valid indexes, of shape [K, S].
         """
         assert n_q == self.n_q, f"invalid number of codebooks for the sequence and the pattern: {n_q} != {self.n_q}"
         assert timesteps <= self.timesteps, "invalid number of timesteps used to build the sequence from the pattern"
@@ -133,8 +135,8 @@ class Pattern:
         # note that using the valid_layout will result in a truncated sequence up to the valid steps
         ref_layout = self.valid_layout if keep_only_valid_steps else self.layout
         # single item indexing being super slow with pytorch vs. numpy, so we use numpy here
-        indexes = torch.zeros(n_q, len(ref_layout), dtype=torch.long).numpy()
-        mask = torch.zeros(n_q, len(ref_layout), dtype=torch.bool).numpy()
+        indexes = ops.zeros((n_q, len(ref_layout)), dtype=mindspore.int64).numpy()
+        mask = ops.zeros((n_q, len(ref_layout)), dtype=mindspore.bool_).numpy()
         # fill indexes with last sequence step value that will correspond to our special token
         # the last value is n_q * timesteps as we have flattened z and append special token as the last token
         # which will correspond to the index: n_q * timesteps
@@ -145,11 +147,11 @@ class Pattern:
                 if coords.t < timesteps:
                     indexes[coords.q, s] = coords.t + coords.q * timesteps
                     mask[coords.q, s] = 1
-        indexes = torch.from_numpy(indexes).to(device)
-        mask = torch.from_numpy(mask).to(device)
+        indexes = Tensor(indexes)
+        mask = Tensor(mask)
         return indexes, mask
 
-    def build_pattern_sequence(self, z: torch.Tensor, special_token: int, keep_only_valid_steps: bool = False):
+    def build_pattern_sequence(self, z: Tensor, special_token: int, keep_only_valid_steps: bool = False):
         """Build sequence corresponding to the pattern from the input tensor z.
         The sequence is built using up to sequence_steps if specified, and non-pattern
         coordinates are filled with the special token.
@@ -167,11 +169,11 @@ class Pattern:
         """
         B, K, T = z.shape
         indexes, mask = self._build_pattern_sequence_scatter_indexes(
-            T, K, keep_only_valid_steps=keep_only_valid_steps, device=str(z.device)
+            T, K, keep_only_valid_steps=keep_only_valid_steps
         )
         z = z.view(B, -1)
         # we append the special token as the last index of our flattened z tensor
-        z = torch.cat([z, torch.zeros_like(z[:, :1]) + special_token], dim=1)
+        z = ops.cat([z, ops.zeros_like(z[:, :1]) + special_token], axis=1)
         values = z[:, indexes.view(-1)]
         values = values.view(B, K, indexes.shape[-1])
         return values, indexes, mask
@@ -179,7 +181,7 @@ class Pattern:
     def _build_reverted_sequence_scatter_indexes(self, sequence_steps: int, n_q: int,
                                                  keep_only_valid_steps: bool = False,
                                                  is_model_output: bool = False,
-                                                 device: tp.Union[torch.device, str] = 'cpu'):
+                                                 device: tp.Union[str] = 'cpu'):
         """Builds scatter indexes required to retrieve the original multi-codebook sequence
         from interleaving pattern.
 
@@ -206,8 +208,9 @@ class Pattern:
             ref_layout = ref_layout[1:]
 
         # single item indexing being super slow with pytorch vs. numpy, so we use numpy here
-        indexes = torch.zeros(n_q, timesteps, dtype=torch.long).numpy()
-        mask = torch.zeros(n_q, timesteps, dtype=torch.bool).numpy()
+        indexes = ops.zeros((n_q, timesteps), dtype=mindspore.intp).asnumpy()
+        mask = ops.zeros((n_q, timesteps), dtype=mindspore.bool_).asnumpy()
+
         # fill indexes with last sequence step value that will correspond to our special token
         indexes[:] = n_q * sequence_steps
         for s, sequence_codes in enumerate(ref_layout):
@@ -216,11 +219,11 @@ class Pattern:
                     if code.t < timesteps:
                         indexes[code.q, code.t] = s + code.q * sequence_steps
                         mask[code.q, code.t] = 1
-        indexes = torch.from_numpy(indexes).to(device)
-        mask = torch.from_numpy(mask).to(device)
+        indexes = Tensor(indexes)
+        mask = Tensor(mask)
         return indexes, mask
 
-    def revert_pattern_sequence(self, s: torch.Tensor, special_token: int, keep_only_valid_steps: bool = False):
+    def revert_pattern_sequence(self, s: Tensor, special_token: int, keep_only_valid_steps: bool = False):
         """Revert a sequence built from the pattern back to the original multi-codebook sequence without interleaving.
         The sequence is reverted using up to timesteps if specified, and non-pattern coordinates
         are filled with the special token.
@@ -236,16 +239,16 @@ class Pattern:
         """
         B, K, S = s.shape
         indexes, mask = self._build_reverted_sequence_scatter_indexes(
-            S, K, keep_only_valid_steps, is_model_output=False, device=str(s.device)
+            S, K, keep_only_valid_steps, is_model_output=False, device=None
         )
         s = s.view(B, -1)
         # we append the special token as the last index of our flattened z tensor
-        s = torch.cat([s, torch.zeros_like(s[:, :1]) + special_token], dim=1)
+        s = ops.cat([s, ops.zeros_like(s[:, :1]) + special_token], axis=1)
         values = s[:, indexes.view(-1)]
         values = values.view(B, K, indexes.shape[-1])
         return values, indexes, mask
 
-    def revert_pattern_logits(self, logits: torch.Tensor, special_token: float, keep_only_valid_steps: bool = False):
+    def revert_pattern_logits(self, logits: ops.Tensor, special_token: float, keep_only_valid_steps: bool = False):
         """Revert model logits obtained on a sequence built from the pattern
         back to a tensor matching the original sequence.
 
@@ -261,7 +264,7 @@ class Pattern:
         )
         logits = logits.reshape(B, card, -1)
         # we append the special token as the last index of our flattened z tensor
-        logits = torch.cat([logits, torch.zeros_like(logits[:, :, :1]) + special_token], dim=-1)  # [B, card, K x S]
+        logits = ops.cat([logits, ops.zeros_like(logits[:, :, :1]) + special_token], dim=-1)  # [B, card, K x S]
         values = logits[:, :, indexes.view(-1)]
         values = values.view(B, card, K, indexes.shape[-1])
         return values, indexes, mask
@@ -299,7 +302,7 @@ class CodebooksPatternProvider(ABC):
         """
         raise NotImplementedError()
 
-
+# done
 class DelayedPatternProvider(CodebooksPatternProvider):
     """Provider for delayed pattern across delayed codebooks.
     Codebooks are delayed in the sequence and sequence steps will contain codebooks
@@ -486,14 +489,9 @@ class UnrolledPatternProvider(CodebooksPatternProvider):
         return Pattern(out, n_q=self.n_q, timesteps=timesteps)
 
 
-class CoarseFirstPattern(CodebooksPatternProvider):
-    """First generates all the codebooks #1 (e.g. coarser), then the remaining ones,
-    potentially with delays.
-
-    ..Warning:: You must always generate the full training duration at test time, for instance,
-        30 seconds, as otherwise, the fine codebooks will start being generated in an unexpected
-        location. This is due to the non causality of the remaining codebooks with respect to
-        the first ones.
+class VALLEPattern(CodebooksPatternProvider):
+    """Almost VALL-E style pattern.
+    We further allow some delays for the codebooks other than the first one.
 
     Args:
         n_q (int): Number of codebooks.

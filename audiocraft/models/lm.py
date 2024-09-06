@@ -10,13 +10,17 @@ import logging
 import math
 import typing as tp
 
-import torch
-from torch import nn
+# import torch
+# from torch import nn
+import mindspore
+from mindspore import nn, ops, Tensor
 
-from ..utils import utils
-from ..modules.streaming import StreamingModule, State
-from ..modules.transformer import StreamingTransformer, create_norm_fn
-from ..modules.conditioners import (
+import sys
+sys.path.append("/disk1/lty/mind-audiocraft2/audiocraft")
+from audiocraft_utils import utils #done
+from modules.streaming import StreamingModule, State #done
+from modules.transformer import StreamingTransformer, create_norm_fn
+from modules.conditioners import (
     ConditionFuser,
     ClassifierFreeGuidanceDropout,
     AttributeDropout,
@@ -24,8 +28,9 @@ from ..modules.conditioners import (
     ConditioningAttributes,
     ConditionType,
 )
-from ..modules.codebooks_patterns import CodebooksPatternProvider
-from ..modules.activations import get_activation_fn
+from modules.codebooks_patterns import CodebooksPatternProvider
+from modules.activations import get_activation_fn
+from modules.embeding import Embedding
 
 
 logger = logging.getLogger(__name__)
@@ -51,17 +56,22 @@ def get_init_fn(method: str, input_dim: int, init_depth: tp.Optional[int] = None
         std = std / math.sqrt(2 * init_depth)
 
     if method == 'gaussian':
-        return partial(
-            torch.nn.init.trunc_normal_, mean=0.0, std=std, a=-3 * std, b=3 * std
-        )
+        # return partial(
+        #     torch.nn.init.trunc_normal_, mean=0.0, std=std, a=-3 * std, b=3 * std
+        # )
+        from mindspore.common.initializer import initializer, TruncatedNormal
+        from mindspore import Parameter
+        TruncatedNormal(mean=0.0, sigma=std, a=-3 * std, b=3 * std)
     elif method == 'uniform':
         bound = math.sqrt(3) * std  # ensure the standard deviation is `std`
-        return partial(torch.nn.init.uniform_, a=-bound, b=bound)
+        minval = Tensor(-bound, mindspore.float32)
+        maxval = Tensor(bound, mindspore.float32)
+        return partial(ops.uniform, minval=minval, maxval=maxval)
     else:
         raise ValueError("Unsupported layer initialization method")
 
 
-def init_layer(m: nn.Module,
+def init_layer(m: nn.Cell,
                method: str,
                init_depth: tp.Optional[int] = None,
                zero_bias_init: bool = False):
@@ -74,9 +84,9 @@ def init_layer(m: nn.Module,
             the standard deviation if defined.
         zero_bias_init (bool): Whether to initialize the bias to 0 or not.
     """
-    if isinstance(m, nn.Linear):
-        init_fn = get_init_fn(method, m.in_features, init_depth=init_depth)
-        if m.weight.device.type == 'cpu' and m.weight.dtype == torch.float16:
+    if isinstance(m, nn.Dense):
+        init_fn = get_init_fn(method, m.in_channels, init_depth=init_depth)
+        if m.weight.dtype == mindspore.float16:
             weight = m.weight.float()
             init_fn(weight)
             m.weight.data[:] = weight.half()
@@ -85,8 +95,8 @@ def init_layer(m: nn.Module,
         if zero_bias_init and m.bias is not None:
             nn.init.constant_(m.bias, 0)
     elif isinstance(m, nn.Embedding):
-        init_fn = get_init_fn(method, m.embedding_dim, init_depth=None)
-        if m.weight.device.type == 'cpu' and m.weight.dtype == torch.float16:
+        init_fn = get_init_fn(method, m.embedding_size, init_depth=None)
+        if m.weight.device.type == 'cpu' and m.weight.dtype == mindspore.float16:
             weight = m.weight.float()
             init_fn(weight)
             m.weight.data[:] = weight.half()
@@ -94,7 +104,7 @@ def init_layer(m: nn.Module,
             init_fn(m.weight)
 
 
-class ScaledEmbedding(nn.Embedding):
+class ScaledEmbedding(Embedding):
     """Boost learning rate for embeddings (with `scale`).
     """
     def __init__(self, *args, lr=None, **kwargs):
@@ -112,8 +122,8 @@ class ScaledEmbedding(nn.Embedding):
 class LMOutput:
     # The logits are already re-aligned with the input codes
     # hence no extra shift is required, e.g. when computing CE
-    logits: torch.Tensor  # [B, K, T, card]
-    mask: torch.Tensor  # [B, K, T]
+    logits: Tensor  # [B, K, T, card]
+    mask: Tensor  # [B, K, T]
 
 
 class LMModel(StreamingModule):
@@ -161,18 +171,18 @@ class LMModel(StreamingModule):
         self.dim = dim
         self.pattern_provider = pattern_provider
         self.two_step_cfg = two_step_cfg
-        self.emb = nn.ModuleList([ScaledEmbedding(embed_dim, dim, lr=emb_lr) for _ in range(n_q)])
+        self.emb = nn.CellList([ScaledEmbedding(embed_dim, dim, lr=emb_lr) for _ in range(n_q)])
         if 'activation' in kwargs:
             kwargs['activation'] = get_activation_fn(kwargs['activation'])
         self.transformer = StreamingTransformer(
             d_model=dim, num_heads=num_heads, dim_feedforward=int(hidden_scale * dim),
             norm=norm, norm_first=norm_first, **kwargs)
-        self.out_norm: tp.Optional[nn.Module] = None
+        self.out_norm: tp.Optional[nn.Cell] = None
         if norm_first:
             self.out_norm = create_norm_fn(norm, dim)
-        self.linears = nn.ModuleList([nn.Linear(dim, self.card, bias=bias_proj) for _ in range(n_q)])
+        self.linears = nn.CellList([nn.Dense(dim, self.card, has_bias=bias_proj) for _ in range(n_q)])
         self._init_weights(weight_init, depthwise_init, zero_bias_init)
-        self._fsdp: tp.Optional[nn.Module]
+        self._fsdp: tp.Optional[nn.Cell]
         self.__dict__['_fsdp'] = None
 
     def _init_weights(self, weight_init: tp.Optional[str], depthwise_init: tp.Optional[str], zero_bias_init: bool):
@@ -195,7 +205,14 @@ class LMModel(StreamingModule):
             return
 
         for emb_layer in self.emb:
-            init_layer(emb_layer, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
+            from mindspore.common.initializer import initializer, TruncatedNormal
+            std = 1 / math.sqrt(emb_layer.embedding_size)
+            #init_layer(emb_layer, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
+            emb_layer.weight.set_data(initializer(TruncatedNormal(sigma=std),
+                emb_layer.weight.shape, emb_layer.weight.dtype))
+            # from mindspore.common.initializer import TruncatedNormal
+            # TruncatedNormal(mean=0.0, sigma=std, a=-3 * std, b=3 * std)
+            # emb_layer.weight = Parameter(initializer(HeNormal(), [1, 2, 3], mindspore.float32))
 
         for layer_idx, tr_layer in enumerate(self.transformer.layers):
             depth = None
@@ -203,11 +220,23 @@ class LMModel(StreamingModule):
                 depth = layer_idx + 1
             elif depthwise_init == 'global':
                 depth = len(self.transformer.layers)
-            init_fn = partial(init_layer, method=weight_init, init_depth=depth, zero_bias_init=zero_bias_init)
-            tr_layer.apply(init_fn)
+
+            # init_fn = partial(init_layer, method=weight_init, init_depth=depth, zero_bias_init=zero_bias_init)
+            # tr_layer.apply(init_fn)
+            if isinstance(tr_layer, nn.Dense):
+                std = 1 / math.sqrt(tr_layer.in_channels)
+                tr_layer.weight.set_data(mindspore.common.initializer.initializer(
+                mindspore.common.initializer.TruncatedNormal(mean=0.0, sigma=std, a=-3 * std, b=3 * std),
+                tr_layer.weight.shape, tr_layer.weight.dtype))
 
         for linear in self.linears:
-            init_layer(linear, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
+            #init_layer(linear, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
+            if isinstance(linear, nn.Dense):
+                std = 1 / math.sqrt(linear.in_channels)
+                linear.weight.set_data(mindspore.common.initializer.initializer(
+                #mindspore.common.initializer.TruncatedNormal(mean=0.0, sigma=std, a=-3 * std, b=3 * std),
+                mindspore.common.initializer.TruncatedNormal(sigma=std),
+                linear.weight.shape, linear.weight.dtype))
 
     @property
     def special_token_id(self) -> int:
@@ -217,9 +246,9 @@ class LMModel(StreamingModule):
     def num_codebooks(self) -> int:
         return self.n_q
 
-    def forward(self, sequence: torch.Tensor,
+    def construct(self, sequence: Tensor,
                 conditions: tp.List[ConditioningAttributes],
-                condition_tensors: tp.Optional[ConditionTensors] = None) -> torch.Tensor:
+                condition_tensors: tp.Optional[ConditionTensors] = None) -> Tensor:
         """Apply language model on sequence and conditions.
         Given a tensor of sequence of shape [B, K, S] with K the number of codebooks and
         S the sequence steps, return the logits with shape [B, card, K, S].
@@ -249,11 +278,14 @@ class LMModel(StreamingModule):
             assert not conditions, "Shouldn't pass both conditions and condition_tensors."
 
         input_, cross_attention_input = self.fuser(input_, condition_tensors)
-
+        #todo
+        # 只是假设试验，将cross_attention_src手动转换为与pytorch一致
+        test_tensor = ops.zeros_like(cross_attention_input, dtype=mindspore.float32)
+        cross_attention_input[1::] = test_tensor[1::]
         out = self.transformer(input_, cross_attention_src=cross_attention_input)
         if self.out_norm:
             out = self.out_norm(out)
-        logits = torch.stack([self.linears[k](out) for k in range(K)], dim=1)  # [B, K, S, card]
+        logits = ops.stack([self.linears[k](out) for k in range(K)], axis=1)  # [B, K, S, card]
 
         # remove the prefix from the model outputs
         if len(self.fuser.fuse2cond['prepend']) > 0:
@@ -262,7 +294,7 @@ class LMModel(StreamingModule):
         return logits  # [B, K, S, card]
 
     def compute_predictions(
-            self, codes: torch.Tensor,
+            self, codes: Tensor,
             conditions: tp.List[ConditioningAttributes],
             condition_tensors: tp.Optional[ConditionTensors] = None) -> LMOutput:
         """Given an input tensor of codes [B, K, T] and list of conditions, runs the model
@@ -297,25 +329,24 @@ class LMModel(StreamingModule):
         logits = model(sequence_codes, conditions, condition_tensors)  # [B, K, S, card]
         # map back the logits on pattern sequence to logits on original codes: [B, K, S, card] -> [B, K, T, card]
         # and provide the corresponding mask over invalid positions of tokens
-        logits = logits.permute(0, 3, 1, 2)  # [B, card, K, S]
+        logits = ops.permute(logits, (0, 3, 1, 2))  # [B, card, K, S]
         # note: we use nans as special token to make it obvious if we feed unexpected logits
         logits, logits_indexes, logits_mask = pattern.revert_pattern_logits(
             logits, float('nan'), keep_only_valid_steps=True
         )
-        logits = logits.permute(0, 2, 3, 1)  # [B, K, T, card]
-        logits_mask = logits_mask[None, :, :].expand(B, -1, -1)  # [K, T] -> [B, K, T]
+        logits = ops.permute(logits, (0, 2, 3, 1))  # [B, K, T, card]
+        logits_mask = ops.broadcast_to(logits_mask[None, :, :], (B, -1, -1))  # [K, T] -> [B, K, T]
         return LMOutput(logits, logits_mask)
 
     def _sample_next_token(self,
-                           sequence: torch.Tensor,
+                           sequence: Tensor,
                            cfg_conditions: CFGConditions,
                            unconditional_state: State,
                            use_sampling: bool = False,
                            temp: float = 1.0,
                            top_k: int = 0,
                            top_p: float = 0.0,
-                           cfg_coef: tp.Optional[float] = None,
-                           two_step_cfg: tp.Optional[bool] = None) -> torch.Tensor:
+                           cfg_coef: tp.Optional[float] = None) -> Tensor:
         """Sample next token from the model given a sequence and a set of conditions. The model supports
         multiple sampling strategies (greedy sampling, softmax, top-k, top-p...).
 
@@ -336,8 +367,7 @@ class LMModel(StreamingModule):
         B = sequence.shape[0]
         cfg_coef = self.cfg_coef if cfg_coef is None else cfg_coef
         model = self if self._fsdp is None else self._fsdp
-        two_step_cfg = self.two_step_cfg if two_step_cfg is None else two_step_cfg
-        if two_step_cfg and cfg_conditions != {}:
+        if self.two_step_cfg and cfg_conditions != {}:
             assert isinstance(cfg_conditions, tuple), type(cfg_conditions)
             condition_tensors, null_condition_tensors = cfg_conditions
             cond_logits = model(sequence, conditions=[], condition_tensors=condition_tensors)
@@ -352,22 +382,22 @@ class LMModel(StreamingModule):
             condition_tensors = cfg_conditions
             if condition_tensors:
                 # Preparing for CFG, predicting both conditional and unconditional logits.
-                sequence = torch.cat([sequence, sequence], dim=0)
+                sequence = ops.cat([sequence, sequence], axis=0)
             all_logits = model(
                 sequence,
                 conditions=[], condition_tensors=condition_tensors)
             if condition_tensors:
-                cond_logits, uncond_logits = all_logits.split(B, dim=0)  # [B, K, T, card]
+                cond_logits, uncond_logits = ops.split(all_logits, B, axis=0)  # [B, K, T, card]
                 logits = uncond_logits + (cond_logits - uncond_logits) * cfg_coef
             else:
                 logits = all_logits
 
-        logits = logits.permute(0, 1, 3, 2)  # [B, K, card, T]
+        logits = ops.permute(logits, (0, 1, 3, 2))  # [B, K, card, T]
         logits = logits[..., -1]  # [B x K x card]
 
         # Apply softmax for sampling if temp > 0. Else, do greedy sampling to avoid zero division error.
         if use_sampling and temp > 0.0:
-            probs = torch.softmax(logits / temp, dim=-1)
+            probs = ops.softmax(logits / temp, axis=-1)
             if top_p > 0.0:
                 next_token = utils.sample_top_p(probs, p=top_p)
             elif top_k > 0:
@@ -375,13 +405,12 @@ class LMModel(StreamingModule):
             else:
                 next_token = utils.multinomial(probs, num_samples=1)
         else:
-            next_token = torch.argmax(logits, dim=-1, keepdim=True)
+            next_token = ops.argmax(logits, axis=-1)
 
         return next_token
 
-    @torch.no_grad()
     def generate(self,
-                 prompt: tp.Optional[torch.Tensor] = None,
+                 prompt: tp.Optional[Tensor] = None,
                  conditions: tp.List[ConditioningAttributes] = [],
                  num_samples: tp.Optional[int] = None,
                  max_gen_len: int = 256,
@@ -393,7 +422,7 @@ class LMModel(StreamingModule):
                  two_step_cfg: tp.Optional[bool] = None,
                  remove_prompts: bool = False,
                  check: bool = False,
-                 callback: tp.Optional[tp.Callable[[int, int], None]] = None) -> torch.Tensor:
+                 callback: tp.Optional[tp.Callable[[int, int], None]] = None) -> Tensor:
         """Generate tokens sampling from the model given a prompt or unconditionally. Generation can
         be perform in a greedy fashion or using sampling with top K and top P strategies.
 
@@ -415,8 +444,8 @@ class LMModel(StreamingModule):
             torch.Tensor: Generated tokens.
         """
         assert not self.training, "generation shouldn't be used in training mode."
-        first_param = next(iter(self.parameters()))
-        device = first_param.device
+        # first_param = next(iter(self.parameters()))
+        # device = first_param.device
 
         # Checking all input shapes are consistent.
         possible_num_samples = []
@@ -457,9 +486,14 @@ class LMModel(StreamingModule):
             cfg_conditions = {}
 
         if prompt is None:
+            import numpy as np
             assert num_samples > 0
-            prompt = torch.zeros((num_samples, self.num_codebooks, 0), dtype=torch.long, device=device)
-
+            # print(self.num_codebooks)
+            prompt = np.zeros((num_samples, self.num_codebooks, 0), dtype=int)
+            np_flag = True
+            #prompt = Tensor(prompt_np)
+            #prompt = ops.ones((num_samples, self.num_codebooks, 0), dtype=mindspore.int64)
+        #print(prompt)
         B, K, T = prompt.shape
         start_offset = T
         assert start_offset < max_gen_len
@@ -469,9 +503,10 @@ class LMModel(StreamingModule):
         unknown_token = -1
 
         # we generate codes up to the max_gen_len that will be mapped to the pattern sequence
-        gen_codes = torch.full((B, K, max_gen_len), unknown_token, dtype=torch.long, device=device)
+        gen_codes = ops.full((B, K, max_gen_len), unknown_token, dtype=mindspore.int64)
         # filling the gen_codes with the prompt if needed
-        gen_codes[..., :start_offset] = prompt
+        if np_flag==False:
+            gen_codes[..., :start_offset] = prompt
         # create the gen_sequence with proper interleaving from the pattern: [B, K, S]
         gen_sequence, indexes, mask = pattern.build_pattern_sequence(gen_codes, self.special_token_id)
         # retrieve the start_offset in the sequence:
@@ -486,23 +521,25 @@ class LMModel(StreamingModule):
             for offset in range(start_offset_sequence, gen_sequence_len):
                 # get current sequence (note that the streaming API is providing the caching over previous offsets)
                 curr_sequence = gen_sequence[..., prev_offset:offset]
-                curr_mask = mask[None, ..., prev_offset:offset].expand(B, -1, -1)
+                curr_mask = ops.broadcast_to(mask[None, ..., prev_offset:offset], (B, -1, -1))
                 if check:
                     # check coherence between mask and sequence
-                    assert (curr_sequence == torch.where(curr_mask, curr_sequence, self.special_token_id)).all()
+                    assert ops.all((curr_sequence == ops.where(curr_mask, curr_sequence, self.special_token_id)))
                     # should never happen as gen_sequence is filled progressively
-                    assert not (curr_sequence == unknown_token).any()
+                    assert not ops.any((curr_sequence == unknown_token))
                 # sample next token from the model, next token shape is [B, K, 1]
                 next_token = self._sample_next_token(
                     curr_sequence, cfg_conditions, unconditional_state, use_sampling, temp, top_k, top_p,
-                    cfg_coef=cfg_coef, two_step_cfg=two_step_cfg)
+                    cfg_coef=cfg_coef)
                 # ensure the tokens that should be masked are properly set to special_token_id
                 # as the model never output special_token_id
-                valid_mask = mask[..., offset:offset+1].expand(B, -1, -1)
+                valid_mask = ops.broadcast_to(mask[..., offset:offset+1], (B, -1, -1))
                 next_token[~valid_mask] = self.special_token_id
                 # ensure we don't overwrite prompt tokens, we only write over unknown tokens
                 # (then mask tokens should be left as is as well, which is correct)
-                gen_sequence[..., offset:offset+1] = torch.where(
+                cast = ops.Cast()
+                next_token = cast(next_token, gen_sequence.dtype)
+                gen_sequence[..., offset:offset+1] = ops.where(
                     gen_sequence[..., offset:offset+1] == unknown_token,
                     next_token, gen_sequence[..., offset:offset+1]
                 )
@@ -510,24 +547,26 @@ class LMModel(StreamingModule):
                 if callback is not None:
                     callback(1 + offset - start_offset_sequence, gen_sequence_len - start_offset_sequence)
         unconditional_state.clear()
-
+        # import numpy as np
+        # a = np.load("/disk1/lty/mind-audiocraft2/output.npy")
+        # gen_sequence = Tensor(a)
         # ensure sequence has been entirely filled
         assert not (gen_sequence == unknown_token).any()
         # ensure gen_sequence pattern and mask are matching
         # which means the gen_sequence is valid according to the pattern
         assert (
-            gen_sequence == torch.where(mask[None, ...].expand(B, -1, -1), gen_sequence, self.special_token_id)
+            gen_sequence == ops.where(mask[None, ...].broadcast_to((B, -1, -1)), gen_sequence, self.special_token_id)
         ).all()
         # get back the codes, trimming the prompt if needed and cutting potentially incomplete timesteps
         out_codes, out_indexes, out_mask = pattern.revert_pattern_sequence(gen_sequence, special_token=unknown_token)
 
         # sanity checks over the returned codes and corresponding masks
-        assert (out_codes[..., :max_gen_len] != unknown_token).all()
-        assert (out_mask[..., :max_gen_len] == 1).all()
+        assert ops.all((out_codes[..., :max_gen_len] != unknown_token))
+        assert ops.all((out_mask[..., :max_gen_len] == 1))
 
         out_start_offset = start_offset if remove_prompts else 0
         out_codes = out_codes[..., out_start_offset:max_gen_len]
 
         # ensure the returned codes are all valid
-        assert (out_codes >= 0).all() and (out_codes <= self.card).all()
+        assert ops.all((out_codes >= 0)) and ops.all((out_codes <= self.card))
         return out_codes

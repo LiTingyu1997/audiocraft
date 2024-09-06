@@ -27,7 +27,7 @@ except ImportError:
 
 from .base import StandardSolver
 from .. import adversarial, data, losses, metrics, optim
-from ..utils.utils import dict_from_config, get_loader
+from ..audiocraft_utils.utils import dict_from_config, get_loader
 
 
 logger = logging.getLogger(__name__)

@@ -6,11 +6,15 @@
 
 import typing as tp
 
+import mindspore
 from einops import rearrange, repeat
-import flashy
-import torch
-from torch import nn, einsum
-import torch.nn.functional as F
+# import flashy
+# import torch
+# from torch import nn, einsum
+# import torch.nn.functional as F
+
+from mindspore import nn, ops, Tensor, Parameter
+import mindspore.common.initializer as init
 
 
 def exists(val: tp.Optional[tp.Any]) -> bool:
@@ -22,20 +26,21 @@ def default(val: tp.Any, d: tp.Any) -> tp.Any:
 
 
 def l2norm(t):
-    return F.normalize(t, p=2, dim=-1)
+    return ops.L2Normalize(axis=-1)(t)
 
 
 def ema_inplace(moving_avg, new, decay: float):
     moving_avg.data.mul_(decay).add_(new, alpha=(1 - decay))
+    #todo
 
 
 def laplace_smoothing(x, n_categories: int, epsilon: float = 1e-5):
-    return (x + epsilon) / (x.sum() + n_categories * epsilon)
+    return (x + epsilon) / (ops.sum(x) + n_categories * epsilon)
 
 
 def uniform_init(*shape: int):
-    t = torch.empty(shape)
-    nn.init.kaiming_uniform_(t)
+    t = ops.empty(shape)
+    init.HeUniform(t)
     return t
 
 
@@ -43,9 +48,9 @@ def sample_vectors(samples, num: int):
     num_samples, device = samples.shape[0], samples.device
 
     if num_samples >= num:
-        indices = torch.randperm(num_samples, device=device)[:num]
+        indices = ops.randperm(num_samples)[:num]
     else:
-        indices = torch.randint(0, num_samples, (num,), device=device)
+        indices = ops.randint(0, num_samples, (num,))
 
     return samples[indices]
 
@@ -56,21 +61,27 @@ def kmeans(samples, num_clusters: int, num_iters: int = 10):
     means = sample_vectors(samples, num_clusters)
 
     for _ in range(num_iters):
-        diffs = rearrange(samples, "n d -> n () d") - rearrange(
-            means, "c d -> () c d"
+        # diffs = rearrange(samples, "n d -> n () d") - rearrange(
+        #     means, "c d -> () c d"
+        # )
+        diffs = ops.unsqueeze(samples, dim=1) - ops(
+            means, dim=0
         )
-        dists = -(diffs ** 2).sum(dim=-1)
+        dists = ops.sum(-(diffs ** 2), dim=-1)
 
         buckets = dists.max(dim=-1).indices
-        bins = torch.bincount(buckets, minlength=num_clusters)
+        bins = ops.bincount(buckets, minlength=num_clusters)
         zero_mask = bins == 0
-        bins_min_clamped = bins.masked_fill(zero_mask, 1)
+        bins_min_clamped = ops.masked_fill(bins, zero_mask, 1)
 
         new_means = buckets.new_zeros(num_clusters, dim, dtype=dtype)
-        new_means.scatter_add_(0, repeat(buckets, "n -> n d", d=dim), samples)
+        #new_means = ops.tensor_scatter_elements(axis=0, input_x=new_means, index=repeat(buckets, "n -> n d", d=dim), src=samples)
+        new_means = ops.tensor_scatter_elements(axis=0, input_x=new_means, index=buckets.repeat(dim).reshape(-1, dim),
+                                                src=samples)
+
         new_means = new_means / bins_min_clamped[..., None]
 
-        means = torch.where(zero_mask[..., None], means, new_means)
+        means = ops.where(zero_mask[..., None], means, new_means)
 
     return means, bins
 
@@ -79,12 +90,12 @@ def orthogonal_loss_fn(t):
     # eq (2) from https://arxiv.org/abs/2112.00384
     n = t.shape[0]
     normed_codes = l2norm(t)
-    identity = torch.eye(n, device=t.device)
-    cosine_sim = einsum("i d, j d -> i j", normed_codes, normed_codes)
+    identity = ops.eye(n)
+    cosine_sim = ops.einsum("i d, j d -> i j", normed_codes, normed_codes)
     return ((cosine_sim - identity) ** 2).sum() / (n ** 2)
 
 
-class EuclideanCodebook(nn.Module):
+class EuclideanCodebook(nn.Cell):
     """Codebook with Euclidean distance.
 
     Args:
@@ -112,21 +123,26 @@ class EuclideanCodebook(nn.Module):
     ):
         super().__init__()
         self.decay = decay
-        init_fn: tp.Union[tp.Callable[..., torch.Tensor], tp.Any] = uniform_init if not kmeans_init else torch.zeros
-        embed = init_fn(codebook_size, dim)
-
+        #init_fn: tp.Union[tp.Callable[..., Tensor], tp.Any] = uniform_init if not kmeans_init else ops.zeros
+        #embed = init_fn((codebook_size, dim))
+        embed = ops.zeros((codebook_size, dim))
         self.codebook_size = codebook_size
 
         self.kmeans_iters = kmeans_iters
         self.epsilon = epsilon
         self.threshold_ema_dead_code = threshold_ema_dead_code
 
-        self.register_buffer("inited", torch.Tensor([not kmeans_init]))
-        self.register_buffer("cluster_size", torch.zeros(codebook_size))
-        self.register_buffer("embed", embed)
-        self.register_buffer("embed_avg", embed.clone())
+        # self.register_buffer("inited", ops.Tensor([not kmeans_init]))
+        # self.register_buffer("cluster_size", ops.zeros(codebook_size))
+        # self.register_buffer("embed", embed)
+        # self.register_buffer("embed_avg", embed.clone())
+        self.inited = Parameter(ops.Tensor([float(not kmeans_init)], dtype=mindspore.float32), name='inited', requires_grad=False)
+        self.cluster_size = Parameter(ops.zeros(codebook_size), name='cluster_size', requires_grad=False)
+        self.embed = Parameter(embed, name='embed', requires_grad=False)
+        #self.embed_avg = Parameter(embed.clone(), name='embed_avg')
+        self.embed_avg = self.embed.clone()
 
-    @torch.jit.ignore
+    #@torch.jit.ignore
     def init_embed_(self, data):
         if self.inited:
             return
@@ -135,12 +151,12 @@ class EuclideanCodebook(nn.Module):
         self.embed.data.copy_(embed)
         self.embed_avg.data.copy_(embed.clone())
         self.cluster_size.data.copy_(cluster_size)
-        self.inited.data.copy_(torch.Tensor([True]))
+        self.inited.data.copy_(Tensor([True]))
         # Make sure all buffers across workers are in sync after initialization
-        flashy.distrib.broadcast_tensors(self.buffers())
+        # flashy.distrib.broadcast_tensors(self.buffers())
 
     def replace_(self, samples, mask):
-        modified_codebook = torch.where(
+        modified_codebook = ops.where(
             mask[..., None], sample_vectors(samples, self.codebook_size), self.embed
         )
         self.embed.data.copy_(modified_codebook)
@@ -150,16 +166,17 @@ class EuclideanCodebook(nn.Module):
             return
 
         expired_codes = self.cluster_size < self.threshold_ema_dead_code
-        if not torch.any(expired_codes):
+        if not ops.any(expired_codes):
             return
 
-        batch_samples = rearrange(batch_samples, "... d -> (...) d")
+        #batch_samples = rearrange(batch_samples, "... d -> (...) d")
+        batch_samples = batch_samples.reshape(-1, batch_samples.shape[-1])
         self.replace_(batch_samples, mask=expired_codes)
-        flashy.distrib.broadcast_tensors(self.buffers())
+        # flashy.distrib.broadcast_tensors(self.buffers())
 
     def preprocess(self, x):
-        x = rearrange(x, "... d -> (...) d")
-        return x
+        #x = rearrange(x, "... d -> (...) d")
+        return x.reshape(-1, x.shape[-1])
 
     def quantize(self, x):
         embed = self.embed.t()
@@ -175,7 +192,20 @@ class EuclideanCodebook(nn.Module):
         return embed_ind.view(*shape[:-1])
 
     def dequantize(self, embed_ind):
-        quantize = F.embedding(embed_ind, self.embed)
+        # import torch
+        # import torch.nn.functional as F
+        # embed_ind = torch.tensor(embed_ind.asnumpy())
+        # embed_torch = torch.tensor(self.embed.asnumpy())
+        # quantize = F.embedding(embed_ind, embed_torch)
+        # quantize = Tensor(quantize.detach().numpy())
+
+        cast = ops.Cast()
+        embed_ind = cast(embed_ind, mindspore.int32)
+        embed = cast(self.embed, mindspore.int32)
+        #quantize = ops.EmbeddingLookup()(embed_ind, embed, 0)
+        vocab_size, embedding_size = embed.shape
+        embedding = nn.Embedding(vocab_size, embedding_size, embedding_table=embed)
+        quantize = embedding(embed_ind)
         return quantize
 
     def encode(self, x):
@@ -192,13 +222,13 @@ class EuclideanCodebook(nn.Module):
         quantize = self.dequantize(embed_ind)
         return quantize
 
-    def forward(self, x):
+    def construct(self, x):
         shape, dtype = x.shape, x.dtype
         x = self.preprocess(x)
         self.init_embed_(x)
 
         embed_ind = self.quantize(x)
-        embed_onehot = F.one_hot(embed_ind, self.codebook_size).type(dtype)
+        embed_onehot = ops.one_hot(embed_ind, self.codebook_size).type(dtype)
         embed_ind = self.postprocess_emb(embed_ind, shape)
         quantize = self.dequantize(embed_ind)
 
@@ -219,7 +249,7 @@ class EuclideanCodebook(nn.Module):
         return quantize, embed_ind
 
 
-class VectorQuantization(nn.Module):
+class VectorQuantization(nn.Cell):
     """Vector quantization implementation.
     Currently supports only euclidean distance.
 
@@ -290,12 +320,18 @@ class VectorQuantization(nn.Module):
 
     def _preprocess(self, x):
         if not self.channels_last:
-            x = rearrange(x, "b d n -> b n d")
+            b, d, n = x.shape
+            x = x.reshape(b, n, d)
+            #x = rearrange(x, "b d n -> b n d")
         return x
 
     def _postprocess(self, quantize):
         if not self.channels_last:
+            # b, n, d = quantize.shape
+            # quantize = quantize.reshape(b, d, n)
+            quantize = quantize.asnumpy()
             quantize = rearrange(quantize, "b n d -> b d n")
+            quantize = Tensor(quantize)
         return quantize
 
     def encode(self, x):
@@ -310,7 +346,7 @@ class VectorQuantization(nn.Module):
         quantize = self._postprocess(quantize)
         return quantize
 
-    def forward(self, x):
+    def construct(self, x):
         device = x.device
         x = self._preprocess(x)
 
@@ -320,11 +356,11 @@ class VectorQuantization(nn.Module):
         if self.training:
             quantize = x + (quantize - x).detach()
 
-        loss = torch.tensor([0.0], device=device, requires_grad=self.training)
+        loss = Tensor([0.0], requires_grad=self.training)
 
         if self.training:
             if self.commitment_weight > 0:
-                commit_loss = F.mse_loss(quantize.detach(), x)
+                commit_loss = ops.mse_loss(quantize.detach(), x)
                 loss = loss + commit_loss * self.commitment_weight
 
             if self.orthogonal_reg_weight > 0:
@@ -332,12 +368,12 @@ class VectorQuantization(nn.Module):
 
                 if self.orthogonal_reg_active_codes_only:
                     # only calculate orthogonal loss for the activated codes for this batch
-                    unique_code_ids = torch.unique(embed_ind)
+                    unique_code_ids = ops.unique(embed_ind)
                     codebook = codebook[unique_code_ids]
 
                 num_codes = codebook.shape[0]
                 if exists(self.orthogonal_reg_max_codes) and num_codes > self.orthogonal_reg_max_codes:
-                    rand_ids = torch.randperm(num_codes, device=device)[:self.orthogonal_reg_max_codes]
+                    rand_ids = ops.randperm(num_codes, device=device)[:self.orthogonal_reg_max_codes]
                     codebook = codebook[rand_ids]
 
                 orthogonal_reg_loss = orthogonal_loss_fn(codebook)
@@ -349,18 +385,18 @@ class VectorQuantization(nn.Module):
         return quantize, embed_ind, loss
 
 
-class ResidualVectorQuantization(nn.Module):
+class ResidualVectorQuantization(nn.Cell):
     """Residual vector quantization implementation.
 
     Follows Algorithm 1. in https://arxiv.org/pdf/2107.03312.pdf
     """
     def __init__(self, *, num_quantizers, **kwargs):
         super().__init__()
-        self.layers = nn.ModuleList(
+        self.layers = nn.CellList(
             [VectorQuantization(**kwargs) for _ in range(num_quantizers)]
         )
 
-    def forward(self, x, n_q: tp.Optional[int] = None):
+    def construct(self, x, n_q: tp.Optional[int] = None):
         quantized_out = 0.0
         residual = x
 
@@ -376,10 +412,10 @@ class ResidualVectorQuantization(nn.Module):
             all_indices.append(indices)
             all_losses.append(loss)
 
-        out_losses, out_indices = map(torch.stack, (all_losses, all_indices))
+        out_losses, out_indices = map(ops.stack, (all_losses, all_indices))
         return quantized_out, out_indices, out_losses
 
-    def encode(self, x: torch.Tensor, n_q: tp.Optional[int] = None) -> torch.Tensor:
+    def encode(self, x: Tensor, n_q: tp.Optional[int] = None) -> Tensor:
         residual = x
         all_indices = []
         n_q = n_q or len(self.layers)
@@ -388,11 +424,11 @@ class ResidualVectorQuantization(nn.Module):
             quantized = layer.decode(indices)
             residual = residual - quantized
             all_indices.append(indices)
-        out_indices = torch.stack(all_indices)
+        out_indices = ops.stack(all_indices)
         return out_indices
 
-    def decode(self, q_indices: torch.Tensor) -> torch.Tensor:
-        quantized_out = torch.tensor(0.0, device=q_indices.device)
+    def decode(self, q_indices: Tensor) -> Tensor:
+        quantized_out = Tensor(0.0)
         for i, indices in enumerate(q_indices):
             layer = self.layers[i]
             quantized = layer.decode(indices)

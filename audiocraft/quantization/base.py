@@ -11,24 +11,25 @@ Base class for all quantizers.
 from dataclasses import dataclass, field
 import typing as tp
 
-import torch
-from torch import nn
+# import torch
+# from torch import nn
+from mindspore import nn, ops, Tensor
 
 
 @dataclass
 class QuantizedResult:
-    x: torch.Tensor
-    codes: torch.Tensor
-    bandwidth: torch.Tensor  # bandwidth in kb/s used, per batch item.
-    penalty: tp.Optional[torch.Tensor] = None
+    x: Tensor
+    codes: Tensor
+    bandwidth: Tensor  # bandwidth in kb/s used, per batch item.
+    penalty: tp.Optional[Tensor] = None
     metrics: dict = field(default_factory=dict)
 
 
-class BaseQuantizer(nn.Module):
+class BaseQuantizer(nn.Cell):
     """Base class for quantizers.
     """
 
-    def forward(self, x: torch.Tensor, frame_rate: int) -> QuantizedResult:
+    def forward(self, x: Tensor, frame_rate: int) -> QuantizedResult:
         """
         Given input tensor x, returns first the quantized (or approximately quantized)
         representation along with quantized codes, bandwidth, and any penalty term for the loss.
@@ -37,11 +38,11 @@ class BaseQuantizer(nn.Module):
         """
         raise NotImplementedError()
 
-    def encode(self, x: torch.Tensor) -> torch.Tensor:
+    def encode(self, x: Tensor) -> Tensor:
         """Encode a given input tensor with the specified sample rate at the given bandwidth."""
         raise NotImplementedError()
 
-    def decode(self, codes: torch.Tensor) -> torch.Tensor:
+    def decode(self, codes: Tensor) -> Tensor:
         """Decode the given codes to the quantized representation."""
         raise NotImplementedError()
 
@@ -66,23 +67,23 @@ class DummyQuantizer(BaseQuantizer):
     def __init__(self):
         super().__init__()
 
-    def forward(self, x: torch.Tensor, frame_rate: int):
-        q = x.unsqueeze(1)
-        return QuantizedResult(x, q, torch.tensor(q.numel() * 32 * frame_rate / 1000 / len(x)).to(x))
+    def forward(self, x: Tensor, frame_rate: int):
+        q = ops.unsqueeze(x, 1)
+        return QuantizedResult(x, q, Tensor(q.numel() * 32 * frame_rate / 1000 / len(x), x.dtype))
 
-    def encode(self, x: torch.Tensor) -> torch.Tensor:
+    def encode(self, x: Tensor) -> Tensor:
         """Encode a given input tensor with the specified sample rate at the given bandwidth.
         In the case of the DummyQuantizer, the codes are actually identical
         to the input and resulting quantized representation as no quantization is done.
         """
-        return x.unsqueeze(1)
+        return ops.unsqueeze(x, 1)
 
-    def decode(self, codes: torch.Tensor) -> torch.Tensor:
+    def decode(self, codes: Tensor) -> Tensor:
         """Decode the given codes to the quantized representation.
         In the case of the DummyQuantizer, the codes are actually identical
         to the input and resulting quantized representation as no quantization is done.
         """
-        return codes.squeeze(1)
+        return ops.squeeze(codes, 1)
 
     @property
     def total_codebooks(self):

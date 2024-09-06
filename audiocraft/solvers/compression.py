@@ -16,9 +16,9 @@ from torch import nn
 
 from . import base, builders
 from .. import models, quantization
-from ..utils import checkpoint
-from ..utils.samples.manager import SampleManager
-from ..utils.utils import get_pool_executor
+from ..audiocraft_utils import checkpoint
+from ..audiocraft_utils.samples.manager import SampleManager
+from ..audiocraft_utils.utils import get_pool_executor
 
 
 logger = logging.getLogger(__name__)

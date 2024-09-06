@@ -7,7 +7,8 @@
 import math
 import typing as tp
 
-import torch
+#import torch
+from mindspore import ops, Tensor
 
 from .base import BaseQuantizer, QuantizedResult
 from .core_vq import ResidualVectorQuantization
@@ -73,32 +74,33 @@ class ResidualVectorQuantizer(BaseQuantizer):
             channels_last=False
         )
 
-    def forward(self, x: torch.Tensor, frame_rate: int):
+    def construct(self, x: Tensor, frame_rate: int):
         n_q = self.n_q
         if self.training and self.q_dropout:
-            n_q = int(torch.randint(1, self.n_q + 1, (1,)).item())
+            n_q = int(ops.randint(1, self.n_q + 1, (1,)).item())
         bw_per_q = math.log2(self.bins) * frame_rate / 1000
         quantized, codes, commit_loss = self.vq(x, n_q=n_q)
-        codes = codes.transpose(0, 1)
+        #codes = codes.transpose(0, 1)
+        codes = ops.swapaxes(codes, (0, 1))
         # codes is [B, K, T], with T frames, K nb of codebooks.
-        bw = torch.tensor(n_q * bw_per_q).to(x)
-        return QuantizedResult(quantized, codes, bw, penalty=torch.mean(commit_loss))
+        bw = Tensor(n_q * bw_per_q, x.dtype)
+        return QuantizedResult(quantized, codes, bw, penalty=ops.mean(commit_loss))
 
-    def encode(self, x: torch.Tensor) -> torch.Tensor:
+    def encode(self, x: Tensor) -> Tensor:
         """Encode a given input tensor with the specified frame rate at the given bandwidth.
         The RVQ encode method sets the appropriate number of quantizer to use
         and returns indices for each quantizer.
         """
         n_q = self.n_q
         codes = self.vq.encode(x, n_q=n_q)
-        codes = codes.transpose(0, 1)
+        codes = ops.swapaxes(codes, (0, 1))
         # codes is [B, K, T], with T frames, K nb of codebooks.
         return codes
 
-    def decode(self, codes: torch.Tensor) -> torch.Tensor:
+    def decode(self, codes: Tensor) -> Tensor:
         """Decode the given codes to the quantized representation."""
         # codes is [B, K, T], with T frames, K nb of codebooks, vq.decode expects [K, B, T].
-        codes = codes.transpose(0, 1)
+        codes = ops.swapaxes(codes, 0, 1)
         quantized = self.vq.decode(codes)
         return quantized
 

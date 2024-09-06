@@ -10,14 +10,16 @@ Streaming module API that should be implemented by all Streaming components,
 
 from contextlib import contextmanager
 import typing as tp
-from torch import nn
-import torch
+# from torch import nn
+# import torch
+from mindspore import nn, Tensor
+import mindspore
 
 
-State = tp.Dict[str, torch.Tensor]
+State = tp.Dict[str, Tensor]
 
 
-class StreamingModule(nn.Module):
+class StreamingModule(nn.Cell):
     """Common API for streaming components.
 
     Each streaming component has a streaming state, which is just a dict[str, Tensor].
@@ -46,7 +48,7 @@ class StreamingModule(nn.Module):
         self._is_streaming = False
 
     def _apply_named_streaming(self, fn: tp.Any):
-        for name, module in self.named_modules():
+        for name, module in self.cells_and_names():
             if isinstance(module, StreamingModule):
                 fn(name, module)
 
@@ -104,7 +106,7 @@ class StreamingModule(nn.Module):
         self._apply_named_streaming(_set)
         assert len(state) == 0, list(state.keys())
 
-    def flush(self, x: tp.Optional[torch.Tensor] = None):
+    def flush(self, x: tp.Optional[Tensor] = None):
         """Flush any remaining outputs that were waiting for completion.
         Typically, for convolutions, this will add the final padding
         and process the last buffer.
@@ -119,13 +121,13 @@ class StreamingModule(nn.Module):
             return self(x)
 
 
-class StreamingSequential(StreamingModule, nn.Sequential):
-    """A streaming compatible alternative of `nn.Sequential`.
-    """
-    def flush(self, x: tp.Optional[torch.Tensor] = None):
-        for module in self:
-            if isinstance(module, StreamingModule):
-                x = module.flush(x)
-            elif x is not None:
-                x = module(x)
-        return x
+# class StreamingSequential(StreamingModule, nn.Sequential):
+#     """A streaming compatible alternative of `nn.Sequential`.
+#     """
+#     def flush(self, x: tp.Optional[torch.Tensor] = None):
+#         for module in self:
+#             if isinstance(module, StreamingModule):
+#                 x = module.flush(x)
+#             elif x is not None:
+#                 x = module(x)
+#         return x

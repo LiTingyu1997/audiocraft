@@ -11,21 +11,26 @@ from the Hydra config.
 
 import typing as tp
 
-import audiocraft
+#import audiocraft
 import omegaconf
-import torch
+#import torch
+import mindspore
+from mindspore import ops
 
-from .encodec import CompressionModel, EncodecModel
-from .lm import LMModel
-from ..modules.codebooks_patterns import (
+from encodec import CompressionModel, EncodecModel
+from lm import LMModel
+
+import sys
+sys.path.append("..")
+from modules.codebooks_patterns import (
     CodebooksPatternProvider,
     DelayedPatternProvider,
     MusicLMPattern,
     ParallelPatternProvider,
     UnrolledPatternProvider,
-    CoarseFirstPattern,
+    VALLEPattern,
 )
-from ..modules.conditioners import (
+from modules.conditioners import (
     BaseConditioner,
     ChromaStemConditioner,
     CLAPEmbeddingConditioner,
@@ -34,10 +39,12 @@ from ..modules.conditioners import (
     LUTConditioner,
     T5Conditioner,
 )
-from .unet import DiffusionUnet
-from .. import quantization as qt
-from ..utils.utils import dict_from_config
-from ..modules.diffusion_schedule import MultiBandProcessor, SampleProcessor
+# from .unet import DiffusionUnet
+import quantization as qt
+from audiocraft_utils.utils import dict_from_config
+#from modules.diffusion_schedule import MultiBandProcessor, SampleProcessor
+
+from modules.seanet import SEANetEncoder, SEANetDecoder
 
 
 def get_quantizer(quantizer: str, cfg: omegaconf.DictConfig, dimension: int) -> qt.BaseQuantizer:
@@ -58,8 +65,8 @@ def get_encodec_autoencoder(encoder_name: str, cfg: omegaconf.DictConfig):
         decoder_override_kwargs = kwargs.pop('decoder')
         encoder_kwargs = {**kwargs, **encoder_override_kwargs}
         decoder_kwargs = {**kwargs, **decoder_override_kwargs}
-        encoder = audiocraft.modules.SEANetEncoder(**encoder_kwargs)
-        decoder = audiocraft.modules.SEANetDecoder(**decoder_kwargs)
+        encoder = SEANetEncoder(**encoder_kwargs)
+        decoder = SEANetDecoder(**decoder_kwargs)
         return encoder, decoder
     else:
         raise KeyError(f"Unexpected compression model {cfg.compression_model}")
@@ -78,7 +85,7 @@ def get_compression_model(cfg: omegaconf.DictConfig) -> CompressionModel:
         # deprecated params
         kwargs.pop('renorm', None)
         return EncodecModel(encoder, decoder, quantizer,
-                            frame_rate=frame_rate, renormalize=renormalize, **kwargs).to(cfg.device)
+                            frame_rate=frame_rate, renormalize=renormalize, **kwargs)
     else:
         raise KeyError(f"Unexpected compression model {cfg.compression_model}")
 
@@ -94,7 +101,7 @@ def get_lm_model(cfg: omegaconf.DictConfig) -> LMModel:
         cls_free_guidance = dict_from_config(getattr(cfg, 'classifier_free_guidance'))
         cfg_prob, cfg_coef = cls_free_guidance['training_dropout'], cls_free_guidance['inference_coef']
         fuser = get_condition_fuser(cfg)
-        condition_provider = get_conditioner_provider(kwargs["dim"], cfg).to(cfg.device)
+        condition_provider = get_conditioner_provider(kwargs["dim"], cfg)
         if len(fuser.fuse2cond['cross']) > 0:  # enforce cross-att programmatically
             kwargs['cross_attention'] = True
         if codebooks_pattern_cfg.modeling is None:
@@ -111,10 +118,11 @@ def get_lm_model(cfg: omegaconf.DictConfig) -> LMModel:
             cfg_dropout=cfg_prob,
             cfg_coef=cfg_coef,
             attribute_dropout=attribute_dropout,
-            dtype=getattr(torch, cfg.dtype),
+            dtype=getattr(mindspore, cfg.dtype),
             device=cfg.device,
             **kwargs
-        ).to(cfg.device)
+        #).to(cfg.device)
+        )
     else:
         raise KeyError(f"Unexpected LM model {cfg.lm_model}")
 
@@ -172,7 +180,7 @@ def get_codebooks_pattern_provider(n_q: int, cfg: omegaconf.DictConfig) -> Codeb
         'parallel': ParallelPatternProvider,
         'delay': DelayedPatternProvider,
         'unroll': UnrolledPatternProvider,
-        'coarse_first': CoarseFirstPattern,
+        'valle': VALLEPattern,
         'musiclm': MusicLMPattern,
     }
     name = cfg.modeling
@@ -196,10 +204,13 @@ def get_debug_compression_model(device='cpu', sample_rate: int = 32000):
         'dimension': 32,
         'ratios': ratios,
     }
-    encoder = audiocraft.modules.SEANetEncoder(**seanet_kwargs)
-    decoder = audiocraft.modules.SEANetDecoder(**seanet_kwargs)
+    import sys
+    sys.path.append("/disk1/lty/mind-audiocraft2/audiocraft")
+    import modules
+    encoder = modules.SEANetEncoder(**seanet_kwargs)
+    decoder = modules.SEANetDecoder(**seanet_kwargs)
     quantizer = qt.ResidualVectorQuantizer(dimension=32, bins=400, n_q=4)
-    init_x = torch.randn(8, 32, 128)
+    init_x = ops.randn(8, 32, 128)
     quantizer(init_x, 1)  # initialize kmeans etc.
     compression_model = EncodecModel(
         encoder, decoder, quantizer,

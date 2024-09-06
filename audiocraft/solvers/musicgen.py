@@ -7,7 +7,6 @@
 from pathlib import Path
 import time
 import typing as tp
-import warnings
 
 import flashy
 import math
@@ -23,9 +22,9 @@ from ..data.audio_dataset import AudioDataset
 from ..data.music_dataset import MusicDataset, MusicInfo, AudioInfo
 from ..data.audio_utils import normalize_audio
 from ..modules.conditioners import JointEmbedCondition, SegmentWithAttributes, WavCondition
-from ..utils.cache import CachedBatchWriter, CachedBatchLoader
-from ..utils.samples.manager import SampleManager
-from ..utils.utils import get_dataset_from_loader, is_jsonable, warn_once
+from ..audiocraft_utils.cache import CachedBatchWriter, CachedBatchLoader
+from ..audiocraft_utils.samples.manager import SampleManager
+from ..audiocraft_utils.utils import get_dataset_from_loader, is_jsonable, warn_once
 
 
 class MusicGenSolver(base.StandardSolver):
@@ -227,6 +226,7 @@ class MusicGenSolver(base.StandardSolver):
         ce = ce / K
         return ce, ce_per_codebook
 
+    @torch.no_grad()
     def _prepare_tokens_and_attributes(
         self, batch: tp.Tuple[torch.Tensor, tp.List[SegmentWithAttributes]],
         check_synchronization_points: bool = False
@@ -243,12 +243,6 @@ class MusicGenSolver(base.StandardSolver):
                 with B the batch size, K the number of codebooks, T_s the token timesteps.
             Padding mask (torch.Tensor): Mask with valid positions in the tokens tensor, of shape [B, K, T_s].
         """
-        if self.model.training:
-            warnings.warn(
-                "Up to version 1.0.1, the _prepare_tokens_and_attributes was evaluated with `torch.no_grad()`. "
-                "This is inconsistent with how model were trained in the MusicGen paper. We removed the "
-                "`torch.no_grad()` in version 1.1.0. Small changes to the final performance are expected. "
-                "Really sorry about that.")
         if self._cached_batch_loader is None or self.current_stage != "train":
             audio, infos = batch
             audio = audio.to(self.device)
@@ -539,7 +533,7 @@ class MusicGenSolver(base.StandardSolver):
                     rtf = 1.
                 else:
                     gen_unprompted_outputs = self.run_generate_step(
-                        batch, gen_duration=target_duration, prompt_duration=None,
+                        batch, gen_duration=target_duration, prompt_duration=prompt_duration,
                         **self.generation_params)
                     gen_unprompted_audio = gen_unprompted_outputs['gen_audio'].cpu()
                     rtf = gen_unprompted_outputs['rtf']

@@ -7,13 +7,14 @@
 import typing as tp
 
 import numpy as np
-import torch.nn as nn
+#import torch.nn as nn
+from mindspore import nn
 
-from .conv import StreamableConv1d, StreamableConvTranspose1d
-from .lstm import StreamableLSTM
+from .conv import StreamableConv1d, StreamableConvTranspose1d #done
+from .lstm import StreamableLSTM #done
 
 
-class SEANetResnetBlock(nn.Module):
+class SEANetResnetBlock(nn.Cell):
     """Residual block from SEANet model.
 
     Args:
@@ -48,19 +49,19 @@ class SEANetResnetBlock(nn.Module):
                                  norm=norm, norm_kwargs=norm_params,
                                  causal=causal, pad_mode=pad_mode),
             ]
-        self.block = nn.Sequential(*block)
-        self.shortcut: nn.Module
+        self.block = nn.SequentialCell(*block)
+        self.shortcut: nn.Cell
         if true_skip:
             self.shortcut = nn.Identity()
         else:
             self.shortcut = StreamableConv1d(dim, dim, kernel_size=1, norm=norm, norm_kwargs=norm_params,
                                              causal=causal, pad_mode=pad_mode)
 
-    def forward(self, x):
+    def construct(self, x):
         return self.shortcut(x) + self.block(x)
 
 
-class SEANetEncoder(nn.Module):
+class SEANetEncoder(nn.Cell):
     """SEANet encoder.
 
     Args:
@@ -110,7 +111,7 @@ class SEANetEncoder(nn.Module):
 
         act = getattr(nn, activation)
         mult = 1
-        model: tp.List[nn.Module] = [
+        model: tp.List[nn.Cell] = [
             StreamableConv1d(channels, mult * n_filters, kernel_size,
                              norm='none' if self.disable_norm_outer_blocks >= 1 else norm,
                              norm_kwargs=norm_params, causal=causal, pad_mode=pad_mode)
@@ -147,13 +148,13 @@ class SEANetEncoder(nn.Module):
                              norm_kwargs=norm_params, causal=causal, pad_mode=pad_mode)
         ]
 
-        self.model = nn.Sequential(*model)
+        self.model = nn.SequentialCell(*model)
 
-    def forward(self, x):
+    def construct(self, x):
         return self.model(x)
 
 
-class SEANetDecoder(nn.Module):
+class SEANetDecoder(nn.Cell):
     """SEANet decoder.
 
     Args:
@@ -206,7 +207,7 @@ class SEANetDecoder(nn.Module):
 
         act = getattr(nn, activation)
         mult = int(2 ** len(self.ratios))
-        model: tp.List[nn.Module] = [
+        model: tp.List[nn.Cell] = [
             StreamableConv1d(dimension, mult * n_filters, kernel_size,
                              norm='none' if self.disable_norm_outer_blocks == self.n_blocks else norm,
                              norm_kwargs=norm_params, causal=causal, pad_mode=pad_mode)
@@ -251,8 +252,8 @@ class SEANetDecoder(nn.Module):
             model += [
                 final_act(**final_activation_params)
             ]
-        self.model = nn.Sequential(*model)
+        self.model = nn.SequentialCell(*model)
 
-    def forward(self, z):
+    def construct(self, z):
         y = self.model(z)
         return y

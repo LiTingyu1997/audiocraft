@@ -20,6 +20,8 @@ of the returned model.
 """
 
 from pathlib import Path
+
+import mindspore
 from huggingface_hub import hf_hub_download
 import typing as tp
 import os
@@ -27,8 +29,10 @@ import os
 from omegaconf import OmegaConf, DictConfig
 import torch
 
-from . import builders
-from .encodec import CompressionModel
+import builders
+from encodec import CompressionModel
+
+from mindspore import Tensor
 
 
 def get_audiocraft_cache_dir() -> tp.Optional[str]:
@@ -75,8 +79,31 @@ def load_compression_model(file_or_url_or_id: tp.Union[Path, str], device='cpu',
     cfg = OmegaConf.create(pkg['xp.cfg'])
     cfg.device = str(device)
     model = builders.get_compression_model(cfg)
-    model.load_state_dict(pkg['best_state'])
-    model.eval()
+    ckpt_pre = pkg['best_state']
+    param_dict = []
+    for k in ckpt_pre.keys():
+        # if ckpt_pre[k].dtype == torch.float16:
+        #     ms_type = mindspore.float16
+        # else:
+        # if "weight_g" in k:
+        #     print(k)
+        #     k_new = k.split("weight_g")[0] + "param_g"
+        # elif "weight_v" in k:
+        #     k_new = k.split("weight_v")[0] + "param_v"
+        # else:
+        #     k_new = k
+        ms_type = mindspore.float32
+        param_np = ckpt_pre[k].numpy()
+        param_ms = Tensor(param_np, dtype=ms_type)
+        param_dict.append({"name": k, "data": param_ms})
+    #mindspore.save_checkpoint(param_dict, '/home/litingyu/08c/compressin.ckpt')
+    #print(model)
+    param_dict = mindspore.load_checkpoint('/disk1/lty/small_config/compressin.ckpt')
+    #print(param_dict)
+    #model.load_state_dict(pkg['best_state'])
+    mindspore.load_param_into_net(model, param_dict)
+    #model.eval()
+    model.set_train(False)
     return model
 
 
@@ -98,8 +125,28 @@ def _delete_param(cfg: DictConfig, full_name: str):
 
 
 def load_lm_model(file_or_url_or_id: tp.Union[Path, str], device='cpu', cache_dir: tp.Optional[str] = None):
-    pkg = load_lm_model_ckpt(file_or_url_or_id, cache_dir=cache_dir)
-    cfg = OmegaConf.create(pkg['xp.cfg'])
+    #pkg = load_lm_model_ckpt(file_or_url_or_id, cache_dir=cache_dir)
+    # ckpt_pre = pkg['best_state']
+    # param_dict = []
+    # for k in ckpt_pre.keys():
+    #     # if ckpt_pre[k].dtype == torch.float16:
+    #     #     ms_type = mindspore.float16
+    #     # else:
+    #     if "norm" in k:
+    #         if "weight" in k:
+    #             k_new = k.split(".weight")[0] + ".gamma"
+    #         if "bias" in k:
+    #             k_new = k.split(".bias")[0] + ".beta"
+    #     else:
+    #         k_new = k
+    #     ms_type = mindspore.float32
+    #     param_np = ckpt_pre[k].numpy()
+    #     param_ms = Tensor(param_np, dtype=ms_type)
+    #     param_dict.append({"name": k_new, "data": param_ms})
+    # mindspore.save_checkpoint(param_dict, '/home/litingyu/08c/test.ckpt')
+    #print(pkg['xp.cfg'])
+    #cfg = OmegaConf.create(pkg['xp.cfg'])
+    cfg = OmegaConf.load("/disk1/lty/small_config/config.yaml")
     cfg.device = str(device)
     if cfg.device == 'cpu':
         cfg.dtype = 'float32'
@@ -108,24 +155,32 @@ def load_lm_model(file_or_url_or_id: tp.Union[Path, str], device='cpu', cache_di
     _delete_param(cfg, 'conditioners.self_wav.chroma_stem.cache_path')
     _delete_param(cfg, 'conditioners.args.merge_text_conditions_p')
     _delete_param(cfg, 'conditioners.args.drop_desc_p')
+
     model = builders.get_lm_model(cfg)
-    model.load_state_dict(pkg['best_state'])
-    model.eval()
-    model.cfg = cfg
+    # ms_params = {}
+    # for param in model.get_parameters():
+    #     name = param.name
+    #     value = param.data.asnumpy()
+    #     print(name, value.shape)
+    #     ms_params[name] = value
+    #model.load_state_dict(pkg['best_state'])
+
+
+    param_dict = mindspore.load_checkpoint('/disk1/lty/small_config/test.ckpt')
+    #print(param_dict)
+    mindspore.load_param_into_net(model, param_dict)
+
+    model.set_train(False)
+    #model.cfg = cfg
     return model
 
 
-def load_mbd_ckpt(file_or_url_or_id: tp.Union[Path, str],
-                  filename: tp.Optional[str] = None,
-                  cache_dir: tp.Optional[str] = None):
-    return _get_state_dict(file_or_url_or_id, filename=filename, cache_dir=cache_dir)
+def load_mbd_ckpt(file_or_url_or_id: tp.Union[Path, str], cache_dir: tp.Optional[str] = None):
+    return _get_state_dict(file_or_url_or_id, filename="all_in_one.pt", cache_dir=cache_dir)
 
 
-def load_diffusion_models(file_or_url_or_id: tp.Union[Path, str],
-                          device='cpu',
-                          filename: tp.Optional[str] = None,
-                          cache_dir: tp.Optional[str] = None):
-    pkg = load_mbd_ckpt(file_or_url_or_id, filename=filename, cache_dir=cache_dir)
+def load_diffusion_models(file_or_url_or_id: tp.Union[Path, str], device='cpu', cache_dir: tp.Optional[str] = None):
+    pkg = load_mbd_ckpt(file_or_url_or_id, cache_dir=cache_dir)
     models = []
     processors = []
     cfgs = []

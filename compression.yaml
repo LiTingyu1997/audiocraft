@@ -1,0 +1,331 @@
+device: cuda
+dtype: float32
+autocast: false
+autocast_dtype: bfloat16
+seed: 2036
+show: 0
+generate_only: false
+execute_only: null
+execute_best: false
+label: null
+logging:
+  level: INFO
+  log_updates: 10
+  log_tensorboard: false
+  log_wandb: false
+tensorboard:
+  with_media_logging: false
+  name: null
+  sub_dir: null
+wandb:
+  with_media_logging: true
+  project: null
+  name: null
+  group: null
+slurm:
+  gpus: 4
+  mem_per_gpu: 40
+  time: 3600
+  constraint: volta32gb
+  partition: learnlab
+  comment: null
+  setup:
+  - module load cudnn/v8.0.3.33-cuda.11.0 NCCL/2.8.3-1-cuda.11.0
+dora:
+  dir: experiments/magma/outputs
+  exclude:
+  - device
+  - wandb.*
+  - tensorboard.*
+  - logging.*
+  - data.num_workers
+  - eval.num_workers
+  - special.*
+  - metrics.visqol.bin
+  - generate_only
+  - execute_only
+  - execute_best
+  - generate.*
+  - optim.eager_sync
+  use_rendezvous: false
+  git_save: true
+datasource:
+  max_sample_rate: 32000
+  max_channels: 1
+  train: egs/compil/merge_mmi11k_v2=0.5_sttk=0.35_pond5=0.15/train
+  valid: egs/mmi/mmi_11k_v2_32khz/valid
+  evaluate: egs/mmi/mmi_11k_v2_32khz/test
+  generate: egs/mmi/mmi_11k_v2_32khz/test
+solver: compression
+checkpoint:
+  continue_from: null
+  save_last: true
+  save_best: true
+  save_every: 25
+  keep_last: 10
+  keep_every_states: null
+dataset:
+  batch_size: 64
+  num_workers: 10
+  segment_duration: 1
+  num_samples: null
+  return_info: false
+  shuffle: false
+  sample_on_duration: true
+  sample_on_weight: true
+  min_segment_ratio: 0.5
+  train:
+    num_samples: 500000
+    shuffle: true
+  valid:
+    num_samples: 10000
+  evaluate:
+    num_samples: 10000
+    batch_size: 32
+  generate:
+    num_samples: 50
+    return_info: true
+    batch_size: 32
+    segment_duration: 10
+valid:
+  every: 1
+generate:
+  every: 25
+  path: samples
+  audio:
+    format: mp3
+    strategy: clip
+  lm:
+    unconditional_samples: 0
+    max_prompt_len: null
+    max_gen_len: null
+    use_sampling: false
+    temp: 1.0
+    top_k: 0
+    top_p: 0.0
+    remove_prompts: false
+  num_workers: 5
+evaluate:
+  every: 25
+  num_workers: 5
+  metrics:
+    visqol: false
+    sisnr: true
+metrics:
+  visqol:
+    mode: audio
+    bin: null
+    model: tcdaudio14_aacvopus_coresv_svrnsim_n.68_g.01_c1.model
+optim:
+  epochs: 200
+  updates_per_epoch: 2000
+  lr: 0.0003
+  optimizer: adam
+  adam:
+    betas:
+    - 0.5
+    - 0.9
+    weight_decay: 0.0
+  ema:
+    use: true
+    updates: 1
+    device: ${device}
+    decay: 0.99
+  max_norm: 0
+schedule:
+  lr_scheduler: null
+  step:
+    step_size: null
+    gamma: null
+  plateau:
+    factor: null
+    patience: null
+  exponential:
+    lr_decay: null
+  cosine:
+    warmup: null
+    lr_min_ratio: 0.0
+    cycle_length: 1.0
+  polynomial_decay:
+    warmup: null
+    zero_lr_warmup_steps: 0
+    end_lr: 0.0
+    power: 1
+  inverse_sqrt:
+    warmup: null
+    warmup_init_lr: 0.0
+  linear_warmup:
+    warmup: null
+    warmup_init_lr: 0.0
+msstftd:
+  in_channels: 1
+  out_channels: 1
+  filters: 32
+  norm: weight_norm
+  n_ffts:
+  - 1024
+  - 2048
+  - 512
+  - 256
+  - 128
+  hop_lengths:
+  - 256
+  - 512
+  - 128
+  - 64
+  - 32
+  win_lengths:
+  - 1024
+  - 2048
+  - 512
+  - 256
+  - 128
+  activation: LeakyReLU
+  activation_params:
+    negative_slope: 0.3
+msd:
+  in_channels: 1
+  out_channels: 1
+  scale_norms:
+  - spectral_norm
+  - weight_norm
+  - weight_norm
+  kernel_sizes:
+  - 5
+  - 3
+  filters: 16
+  max_filters: 1024
+  downsample_scales:
+  - 4
+  - 4
+  - 4
+  - 4
+  inner_kernel_sizes: null
+  groups:
+  - 4
+  - 4
+  - 4
+  - 4
+  strides: null
+  paddings: null
+  activation: LeakyReLU
+  activation_params:
+    negative_slope: 0.3
+mpd:
+  in_channels: 1
+  out_channels: 1
+  periods:
+  - 2
+  - 3
+  - 5
+  - 7
+  - 11
+  n_layers: 5
+  kernel_size: 5
+  stride: 3
+  filters: 8
+  filter_scales: 4
+  max_filters: 1024
+  activation: LeakyReLU
+  activation_params:
+    negative_slope: 0.3
+  norm: weight_norm
+l1: {}
+l2: {}
+mrstft:
+  factor_sc: 0.5
+  factor_mag: 0.5
+  normalized: false
+mel:
+  sample_rate: ${sample_rate}
+  n_fft: 1024
+  hop_length: 256
+  win_length: 1024
+  n_mels: 64
+  f_min: 64
+  f_max: null
+  normalized: false
+  floor_level: 1.0e-05
+sisnr:
+  sample_rate: ${sample_rate}
+  segment: 5.0
+msspec:
+  sample_rate: ${sample_rate}
+  range_start: 6
+  range_end: 11
+  n_mels: 64
+  f_min: 64
+  f_max: null
+  normalized: true
+  alphas: false
+  floor_level: 1.0e-05
+sample_rate: 32000
+channels: 1
+losses:
+  adv: 4.0
+  feat: 4.0
+  l1: 0.1
+  mel: 0.0
+  msspec: 2.0
+  sisnr: 0.0
+balancer:
+  balance_grads: true
+  ema_decay: 0.999
+  per_batch_item: true
+  total_norm: 1.0
+adversarial:
+  every: 1
+  adversaries:
+  - msstftd
+  adv_loss: hinge
+  feat_loss: l1
+compression_model: encodec
+encodec:
+  autoencoder: seanet
+  quantizer: rvq
+  sample_rate: ${sample_rate}
+  channels: ${channels}
+  causal: false
+  renorm: false
+  renormalize: false
+seanet:
+  dimension: 128
+  channels: ${channels}
+  causal: ${encodec.causal}
+  n_filters: 64
+  n_residual_layers: 1
+  ratios:
+  - 8
+  - 5
+  - 4
+  - 4
+  activation: ELU
+  activation_params:
+    alpha: 1.0
+  norm: weight_norm
+  norm_params: {}
+  kernel_size: 7
+  residual_kernel_size: 3
+  last_kernel_size: 7
+  dilation_base: 2
+  pad_mode: reflect
+  true_skip: true
+  compress: 2
+  lstm: 2
+  disable_norm_outer_blocks: 0
+  decoder:
+    trim_right_ratio: 1.0
+    final_activation: null
+    final_activation_params: null
+  encoder: {}
+rvq:
+  n_q: 4
+  q_dropout: false
+  bins: 2048
+  decay: 0.99
+  kmeans_init: true
+  kmeans_iters: 50
+  threshold_ema_dead_code: 2
+  orthogonal_reg_weight: 0.0
+  orthogonal_reg_active_codes_only: false
+no_quant: {}

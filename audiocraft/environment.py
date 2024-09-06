@@ -16,7 +16,7 @@ import typing as tp
 
 import omegaconf
 
-from .utils.cluster import _guess_cluster_type
+from .audiocraft_utils.cluster import _guess_cluster_type
 
 
 logger = logging.getLogger(__name__)

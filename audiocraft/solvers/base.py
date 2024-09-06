@@ -16,12 +16,12 @@ from torch import nn
 
 from .. import optim
 from ..optim import fsdp
-from ..utils import checkpoint
-from ..utils.autocast import TorchAutocast
-from ..utils.best_state import BestStateDictManager
-from ..utils.deadlock import DeadlockDetect
-from ..utils.profiler import Profiler
-from ..utils.utils import copy_state, dict_from_config, model_hash, with_rank_rng
+from ..audiocraft_utils import checkpoint
+from ..audiocraft_utils.autocast import TorchAutocast
+from ..audiocraft_utils.best_state import BestStateDictManager
+from ..audiocraft_utils.deadlock import DeadlockDetect
+from ..audiocraft_utils.profiler import Profiler
+from ..audiocraft_utils.utils import copy_state, dict_from_config, model_hash, with_rank_rng
 
 
 class StandardSolver(ABC, flashy.BaseSolver):
